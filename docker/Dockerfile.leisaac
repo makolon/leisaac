@@ -1,0 +1,205 @@
+# Everything past this stage is to install
+FROM nvcr.io/nvidia/cuda:12.4.1-devel-ubuntu22.04 AS cuda_stage
+
+# Leisaac Extension
+FROM isaac-lab-ros2 AS leisaac
+
+# Path to the Leisaac direcotry
+ARG LEISAAC_PATH_ARG
+ENV LEISAAC_PATH=${LEISAAC_PATH_ARG}
+# Home dir of docker user, typically '/root'
+ARG CUROBO_INSTALL_PATH_ARG
+ENV CUROBO_INSTALL_PATH=${CUROBO_INSTALL_PATH_ARG}
+
+# Copy cuda11.8 from cuda_stage image
+COPY --from=cuda_stage /usr/local/cuda-12.4 /usr/local/cuda-12.4
+ENV PATH=/usr/local/cuda-12.4/bin:$PATH
+ENV TORCH_CUDA_ARCH_LIST="7.0 7.5 8.0 8.6+PTX"
+ENV USE_CX11_ABI=0
+ENV PRE_CX11_ABI=ON
+ENV CUDA_HOME='/usr/local/cuda-12.4/'
+
+# Install dependencies
+RUN --mount=type=cache,target=/var/cache/apt \
+    apt-get update && apt-get install -y --no-install-recommends \
+    autoconf \
+    automake \
+    git-core \
+    libaom-dev \
+    libgnutls28-dev \
+    libmp3lame-dev \
+    libncurses-dev \
+    libnuma-dev \
+    libopus-dev \
+    libsuitesparse-dev \
+    libtool \
+    libvorbis-dev \
+    libvpx-dev \
+    libx264-dev \
+    libx265-dev \
+    meson \
+    nasm \
+    ninja-build \
+    openssh-client \
+    pkg-config \
+    texinfo \
+    wget \
+    yasm \
+    zlib1g-dev
+
+# Upgrade pip
+RUN --mount=type=cache,target=/var/cache/apt \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install --upgrade pip
+
+# Install SVT-AV1 codec
+RUN --mount=type=cache,target=/var/cache/apt \
+    cd /root && \
+    wget https://gitlab.com/AOMediaCodec/SVT-AV1/-/archive/v2.3.0/SVT-AV1-v2.3.0.tar.gz && \
+    tar -zxvf SVT-AV1-v2.3.0.tar.gz && \
+    rm SVT-AV1-v2.3.0.tar.gz && \
+    mv SVT-AV1-v2.3.0 SVT-AV1 && \
+    cd SVT-AV1/Build && \
+    cmake -G "Unix Makefiles" -DCMAKE_INSTALL_PREFIX="$HOME/.ffmpeg-build" -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_DEC=OFF -DBUILD_SHARED_LIBS=OFF .. && \
+    make -j4 && make install
+
+# Install ffmpeg
+RUN --mount=type=cache,target=/var/cache/apt \
+    mkdir -p ${HOME}/.ffmpeg-src && \
+    cd ${HOME}/.ffmpeg-src && \
+    wget https://ffmpeg.org/releases/ffmpeg-snapshot.tar.bz2 && \
+    tar xf ffmpeg-snapshot.tar.bz2 && \
+    rm ffmpeg-snapshot.tar.bz2 && \
+    cd ffmpeg && \
+    PKG_CONFIG_PATH="${HOME}/.ffmpeg-build/lib/pkgconfig" ./configure \
+        --prefix="${HOME}/.ffmpeg-build" \
+        --pkg-config-flags="--static" \
+        --extra-cflags="-I${HOME}/.ffmpeg-build/include" \
+        --extra-ldflags="-L${HOME}/.ffmpeg-build/lib" \
+        --extra-libs="-lpthread -lm" \
+        --ld="g++" \
+        --bindir="${HOME}/.ffmpeg/bin" \
+        --disable-ffplay \
+        --enable-gpl \
+        --enable-openssl \
+        --enable-libsvtav1 \
+        --enable-libx264 \
+        --enable-libx265 \
+        --enable-nonfree && \
+    make -j8 && make install
+
+# Install lerobot
+RUN --mount=type=cache,target=/var/cache/apt \
+    cd /root && \
+    git clone https://github.com/huggingface/lerobot.git && \
+    cd lerobot && \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install -e .
+
+# Install foam
+RUN --mount=type=cache,target=/var/cache/apt \
+    cd /root && \
+    git clone https://github.com/CoMMALab/foam.git && \
+    cd foam && \
+    git config -f .gitmodules submodule.external/manifold.url https://github.com/hjwdzh/ManifoldPlus.git && \
+    git config -f .gitmodules submodule.external/manifold_old.url https://github.com/hjwdzh/Manifold.git && \
+    git config -f .gitmodules submodule.external/simplify.url https://github.com/sp4cerat/Fast-Quadric-Mesh-Simplification.git && \
+    git submodule sync && \
+    git submodule update --init --recursive && \
+    cmake -Bbuild -GNinja . && \
+    cmake --build build/ && \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install -e .
+
+# Install graspnet-baseline
+RUN --mount=type=cache,target=/var/cache/apt \
+    cd /root && \
+    git clone https://github.com/graspnet/graspnet-baseline.git && \
+    cd graspnet-baseline/pointnet2 && \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh setup.py install && \
+    cd ../knn && \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh setup.py install
+
+# Install graspnetAPI
+RUN --mount=type=cache,target=/var/cache/apt \
+    cd /root && \
+    git clone https://github.com/graspnet/graspnetAPI.git && \
+    cd graspnetAPI && \
+    export SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True && \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install -e .
+
+# Install grasp-diffusion
+RUN --mount=type=cache,target=/var/cache/apt \
+    cd /root && \
+    git clone https://github.com/makolon/grasp_diffusion.git && \
+    cd grasp_diffusion && \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install -e .
+
+# Create third party directory
+RUN --mount=type=cache,target=/var/cache/apt \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install ninja wheel tomli && \
+    mkdir ${CUROBO_INSTALL_PATH}
+
+# Install gflags and glog statically, instructions from: https://github.com/nvidia-isaac/nvblox/blob/public/docs/redistributable.md
+RUN --mount=type=cache,target=/var/cache/apt \
+    cd ${CUROBO_INSTALL_PATH}/ && \
+    wget https://cmake.org/files/v3.27/cmake-3.27.1.tar.gz && \
+    tar -xvzf cmake-3.27.1.tar.gz && \
+    cd cmake-3.27.1 && \
+    ./bootstrap && \
+    make -j8 && \
+    make install && \
+    cd ${CUROBO_INSTALL_PATH}/ && \
+    rm cmake-3.27.1.tar.gz
+
+# Install SQLite
+RUN --mount=type=cache,target=/var/cache/apt \
+    cd ${CUROBO_INSTALL_PATH}/ && \
+    git clone https://github.com/sqlite/sqlite.git -b version-3.39.4 && \
+    cd ${CUROBO_INSTALL_PATH}/sqlite && \
+    CFLAGS=-fPIC ./configure --prefix=${CUROBO_INSTALL_PATH}/sqlite/install/ && \
+    make && \
+    make install
+
+# Install glog
+RUN --mount=type=cache,target=/var/cache/apt \
+    cd ${CUROBO_INSTALL_PATH}/ && \ 
+    git clone https://github.com/google/glog.git -b v0.6.0 && \
+    cd glog && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_INSTALL_PREFIX=${CUROBO_INSTALL_PATH}/glog/install/ \
+        -DWITH_GFLAGS=OFF -DWITH_GTEST=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_CXX_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${USE_CX11_ABI} && \
+    make -j8 && \
+    make install
+
+# Install gflags
+RUN --mount=type=cache,target=/var/cache/apt \
+    cd ${CUROBO_INSTALL_PATH}/ && \
+    git clone https://github.com/gflags/gflags.git -b v2.2.2 && \
+    cd gflags && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_INSTALL_PREFIX=/pkgs/gflags/install/ \
+        -DGFLAGS_BUILD_STATIC_LIBS=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${USE_CX11_ABI} && \
+    make -j8 && \
+    make install
+
+# We also need libglog for pytorch
+RUN --mount=type=cache,target=/var/cache/apt \
+    cd ${CUROBO_INSTALL_PATH}/glog && \
+    mkdir build_isaac && cd build_isaac && \
+    cmake .. -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DWITH_GFLAGS=OFF -DWITH_GTEST=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_CXX_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${USE_CX11_ABI} && \
+    make -j8 && \
+    make install
+
+# Install cuRobo
+RUN --mount=type=cache,target=/var/cache/apt \
+    cd ${CUROBO_INSTALL_PATH}/ && \
+    git clone https://github.com/NVlabs/curobo.git && \
+    cd curobo && \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install .[dev] --no-build-isolation
+
+# make working directory as the Leisaac directory
+# this is the default directory when the container is run
+WORKDIR ${LEISAAC_PATH}
