@@ -77,3 +77,6 @@ assets/robots/*
 
 # greenscreen
 greenscreen/*
+
+# env
+.env
