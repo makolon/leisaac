@@ -16,6 +16,7 @@ from isaaclab.app import AppLauncher
 # add argparse arguments
 parser = argparse.ArgumentParser(description="leisaac teleoperation for leisaac environments.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
+parser.add_argument("--teleop_device", type=str, default="bi-so101leader", choices=['so101leader', 'bi-so101leader'], help="Device for interacting with environment")
 parser.add_argument("--port", type=str, default='/dev/ttyACM0', help="Port for the teleop device:so101leader, default is /dev/ttyACM0")
 parser.add_argument("--zmq_host", type=str, default="0.0.0.0", help="ZeroMQ bind host for bi-so101-zeromq-receiver")
 parser.add_argument("--zmq_port", type=int, default=5555, help="ZeroMQ port for bi-so101-zeromq-receiver")
@@ -61,12 +62,65 @@ from isaaclab.managers import TerminationTermCfg, DatasetExportMode
 
 from leisaac.enhance.managers import StreamingRecorderManager, EnhanceDatasetExportMode
 from leisaac.utils.env_utils import dynamic_reset_gripper_effort_limit_sim
+from leisaac.assets.robots.lerobot import SO101_FOLLOWER_USD_JOINT_LIMLITS, SO101_FOLLOWER_MOTOR_LIMITS
+
+
+# Joint names mapping to motor IDs
+JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+
+
+def convert_zmq_action_to_radians(joint_positions: list[float], gripper: float, device: torch.device) -> torch.Tensor:
+    """Convert ZeroMQ received joint positions from motor limits to joint limits in radians.
+    
+    Args:
+        joint_positions: 5 joint positions in motor limit range (degrees)
+        gripper: Gripper position (0.0 or 1.0)
+        device: torch device
+    
+    Returns:
+        Tensor of 6 joint values in radians
+    """
+    motor_limits = SO101_FOLLOWER_MOTOR_LIMITS
+    joint_limits = SO101_FOLLOWER_USD_JOINT_LIMLITS
+    
+    processed_action = torch.zeros(6, device=device)
+    
+    # Process 5 arm joints
+    for i, joint_name in enumerate(JOINT_NAMES[:5]):
+        motor_value = joint_positions[i]
+        motor_range = motor_limits[joint_name]
+        joint_range = joint_limits[joint_name]
+        
+        # Scale from motor limits to joint limits (degrees)
+        processed_degree = (motor_value - motor_range[0]) / (motor_range[1] - motor_range[0]) \
+            * (joint_range[1] - joint_range[0]) + joint_range[0]
+        
+        # Convert degrees to radians
+        processed_radians = processed_degree / 180.0 * torch.pi
+        processed_action[i] = processed_radians
+    
+    # Process gripper (already in correct range 0-100, scale to joint limits)
+    gripper_motor_range = motor_limits["gripper"]
+    gripper_joint_range = joint_limits["gripper"]
+    
+    # Convert gripper from 0-1 range to motor limit range
+    gripper_motor_value = gripper * (gripper_motor_range[1] - gripper_motor_range[0]) + gripper_motor_range[0]
+    
+    # Scale to joint limits (degrees)
+    gripper_degree = (gripper_motor_value - gripper_motor_range[0]) / (gripper_motor_range[1] - gripper_motor_range[0]) \
+        * (gripper_joint_range[1] - gripper_joint_range[0]) + gripper_joint_range[0]
+    
+    # Convert to radians
+    gripper_radians = gripper_degree / 180.0 * torch.pi
+    processed_action[5] = gripper_radians
+    
+    return processed_action
 
 
 class BiSO101ZMQReceiver:
     """ZeroMQ receiver for bimanual SO101 leader data running in a background thread."""
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 5555, topic: str = "pose", timeout: float = 0.01):
+    def __init__(self, host: str = "0.0.0.0", port: int = 5555, topic: str = "pose", timeout: float = 0.01, device: torch.device = None):
         """Initialize ZeroMQ subscriber with background thread.
         
         Args:
@@ -74,11 +128,13 @@ class BiSO101ZMQReceiver:
             port: Port number
             topic: Topic to subscribe to
             timeout: Poll timeout in seconds
+            device: torch device for tensor operations
         """
         self.host = host
         self.port = port
         self.topic = topic
         self.timeout = timeout
+        self.device = device if device is not None else torch.device("cpu")
         
         # Shared data storage (12 elements: left_joints(5) + left_gripper(1) + right_joints(5) + right_gripper(1))
         self.shared_action = Array(ctypes.c_float, 12)
@@ -124,7 +180,6 @@ class BiSO101ZMQReceiver:
         
         message_count = 0
         last_print_time = time.time()
-        first_message = True
         
         try:
             while self.running.value:
@@ -154,20 +209,6 @@ class BiSO101ZMQReceiver:
                         
                         right_joints = right_arm.get("joint_positions", [])
                         right_gripper = right_arm.get("gripper", 0.0)
-                        
-                        # Validate joint positions length
-                        if len(left_joints) < 5 or len(right_joints) < 5:
-                            print(f"[ZMQ Receiver] Invalid joint positions length: left={len(left_joints)}, right={len(right_joints)} (expected 5 each)")
-                            print(f"[ZMQ Receiver] left_joints: {left_joints}")
-                            print(f"[ZMQ Receiver] right_joints: {right_joints}")
-                            continue
-                        
-                        # Print first message details for debugging
-                        if first_message:
-                            print(f"[ZMQ Receiver] First message received successfully!")
-                            print(f"[ZMQ Receiver] left_joints (5): {left_joints[:5]}, left_gripper: {left_gripper}")
-                            print(f"[ZMQ Receiver] right_joints (5): {right_joints[:5]}, right_gripper: {right_gripper}")
-                            first_message = False
                         
                         # Update shared memory: [left_joints(5), left_gripper(1), right_joints(5), right_gripper(1)]
                         for i in range(5):
@@ -201,19 +242,34 @@ class BiSO101ZMQReceiver:
             ctx.term()
             print("[ZMQ Receiver] Thread stopped")
 
-    def advance(self) -> np.ndarray | None:
-        """Get latest received action data.
+    def advance(self) -> torch.Tensor | None:
+        """Get latest received action data with proper scaling.
         
         Returns:
-            Action array [left_joints(5), left_gripper(1), right_joints(5), right_gripper(1)] = 12 elements total
+            Action tensor [left_joints(5), left_gripper(1), right_joints(5), right_gripper(1)] = 12 elements total
+            Scaled and converted to radians.
             Returns None if no data received yet.
         """
         if not self.data_ready.value:
             return None
         
         # Copy data from shared memory
-        action = np.array(self.shared_action[:], dtype=np.float32)
-        return action
+        raw_action = np.array(self.shared_action[:], dtype=np.float32)
+        
+        # Extract left and right arm data
+        left_joints = raw_action[:5].tolist()   # left joint positions (5)
+        left_gripper = float(raw_action[5])      # left gripper (1)
+        right_joints = raw_action[6:11].tolist() # right joint positions (5)
+        right_gripper = float(raw_action[11])    # right gripper (1)
+        
+        # Convert to radians with proper scaling
+        left_action = convert_zmq_action_to_radians(left_joints, left_gripper, self.device)
+        right_action = convert_zmq_action_to_radians(right_joints, right_gripper, self.device)
+        
+        # Concatenate: [left(6), right(6)]
+        processed_action = torch.cat([left_action, right_action], dim=0)
+        
+        return processed_action
     
     def stop(self):
         """Stop the background thread."""
@@ -269,6 +325,7 @@ def main():
         os.makedirs(output_dir)
 
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
+    env_cfg.use_teleop_device(args_cli.teleop_device)
     env_cfg.seed = args_cli.seed if args_cli.seed is not None else int(time.time())
     task_name = args_cli.task
 
@@ -298,6 +355,7 @@ def main():
 
     # create environment
     env: ManagerBasedRLEnv = gym.make(task_name, cfg=env_cfg).unwrapped
+
     # replace the original recorder manager with the streaming recorder manager
     if args_cli.record:
         del env.recorder_manager
@@ -310,7 +368,8 @@ def main():
         host=args_cli.zmq_host,
         port=args_cli.zmq_port,
         topic="pose",
-        timeout=0.01
+        timeout=0.01,
+        device=env.device
     )
     print(f"[INFO] Using ZeroMQ receiver: {teleop_interface}")
 
@@ -377,10 +436,8 @@ def main():
                     if args_cli.record:
                         print("Start Recording!!!")
                     start_record_state = True
-                actions = torch.tensor(actions, device=env.device).unsqueeze(0).repeat(env.num_envs, 1)
-                
-                # Temporally
-                actions = actions[:, :6]
+                # actions is already a torch.Tensor from advance(), just reshape for num_envs
+                actions = actions.unsqueeze(0).repeat(env.num_envs, 1)
                 print("actions:", actions)
                 env.step(actions)
             if rate_limiter:
