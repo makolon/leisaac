@@ -48,11 +48,15 @@ RUN --mount=type=cache,target=/var/cache/apt \
     zlib1g-dev
 
 # Upgrade pip
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install --upgrade pip
 
+# Install pyzmq
+RUN --mount=type=cache,target=/var/cache/pip \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install zmq
+
 # Install SVT-AV1 codec
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     cd /root && \
     wget https://gitlab.com/AOMediaCodec/SVT-AV1/-/archive/v2.3.0/SVT-AV1-v2.3.0.tar.gz && \
     tar -zxvf SVT-AV1-v2.3.0.tar.gz && \
@@ -64,7 +68,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     make -j4 && make install
 
 # Install ffmpeg
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     mkdir -p ${HOME}/.ffmpeg-src && \
     cd ${HOME}/.ffmpeg-src && \
     wget https://ffmpeg.org/releases/ffmpeg-snapshot.tar.bz2 && \
@@ -89,14 +93,14 @@ RUN --mount=type=cache,target=/var/cache/apt \
     make -j8 && make install
 
 # Install lerobot
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     cd /root && \
     git clone https://github.com/huggingface/lerobot.git && \
     cd lerobot && \
     ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install -e .
 
 # Install foam
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     cd /root && \
     git clone https://github.com/CoMMALab/foam.git && \
     cd foam && \
@@ -110,7 +114,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install -e .
 
 # Install graspnet-baseline
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     cd /root && \
     git clone https://github.com/graspnet/graspnet-baseline.git && \
     cd graspnet-baseline/pointnet2 && \
@@ -119,7 +123,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     ${ISAACLAB_PATH}/_isaac_sim/python.sh setup.py install
 
 # Install graspnetAPI
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     cd /root && \
     git clone https://github.com/graspnet/graspnetAPI.git && \
     cd graspnetAPI && \
@@ -127,19 +131,19 @@ RUN --mount=type=cache,target=/var/cache/apt \
     ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install -e .
 
 # Install grasp-diffusion
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     cd /root && \
     git clone https://github.com/makolon/grasp_diffusion.git && \
     cd grasp_diffusion && \
     ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install -e .
 
 # Create third party directory
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     ${ISAACLAB_PATH}/_isaac_sim/python.sh -m pip install ninja wheel tomli && \
     mkdir ${CUROBO_INSTALL_PATH}
 
 # Install gflags and glog statically, instructions from: https://github.com/nvidia-isaac/nvblox/blob/public/docs/redistributable.md
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     cd ${CUROBO_INSTALL_PATH}/ && \
     wget https://cmake.org/files/v3.27/cmake-3.27.1.tar.gz && \
     tar -xvzf cmake-3.27.1.tar.gz && \
@@ -151,7 +155,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     rm cmake-3.27.1.tar.gz
 
 # Install SQLite
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     cd ${CUROBO_INSTALL_PATH}/ && \
     git clone https://github.com/sqlite/sqlite.git -b version-3.39.4 && \
     cd ${CUROBO_INSTALL_PATH}/sqlite && \
@@ -160,7 +164,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     make install
 
 # Install glog
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     cd ${CUROBO_INSTALL_PATH}/ && \ 
     git clone https://github.com/google/glog.git -b v0.6.0 && \
     cd glog && \
@@ -173,7 +177,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     make install
 
 # Install gflags
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     cd ${CUROBO_INSTALL_PATH}/ && \
     git clone https://github.com/gflags/gflags.git -b v2.2.2 && \
     cd gflags && \
@@ -185,7 +189,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     make install
 
 # We also need libglog for pytorch
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     cd ${CUROBO_INSTALL_PATH}/glog && \
     mkdir build_isaac && cd build_isaac && \
     cmake .. -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -194,7 +198,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     make install
 
 # Install cuRobo
-RUN --mount=type=cache,target=/var/cache/apt \
+RUN --mount=type=cache,target=/var/cache/pip \
     cd ${CUROBO_INSTALL_PATH}/ && \
     git clone https://github.com/NVlabs/curobo.git && \
     cd curobo && \

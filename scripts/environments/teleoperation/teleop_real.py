@@ -53,8 +53,9 @@ import json
 import zmq
 import numpy as np
 import threading
-from multiprocessing import Process, Array, Value
 import ctypes
+from multiprocessing import Process, Array, Value
+from typing import Union
 
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab_tasks.utils import parse_env_cfg
@@ -69,12 +70,11 @@ from leisaac.assets.robots.lerobot import SO101_FOLLOWER_USD_JOINT_LIMLITS, SO10
 JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 
 
-def convert_zmq_action_to_radians(joint_positions: list[float], gripper: float, device: torch.device) -> torch.Tensor:
+def convert_zmq_action_to_radians(joint_positions: list[float], device: Union[str, torch.device]) -> torch.Tensor:
     """Convert ZeroMQ received joint positions from motor limits to joint limits in radians.
     
     Args:
         joint_positions: 5 joint positions in motor limit range (degrees)
-        gripper: Gripper position (0.0 or 1.0)
         device: torch device
     
     Returns:
@@ -85,8 +85,8 @@ def convert_zmq_action_to_radians(joint_positions: list[float], gripper: float, 
     
     processed_action = torch.zeros(6, device=device)
     
-    # Process 5 arm joints
-    for i, joint_name in enumerate(JOINT_NAMES[:5]):
+    # Process 6 arm joints
+    for i, joint_name in enumerate(JOINT_NAMES):
         motor_value = joint_positions[i]
         motor_range = motor_limits[joint_name]
         joint_range = joint_limits[joint_name]
@@ -98,21 +98,6 @@ def convert_zmq_action_to_radians(joint_positions: list[float], gripper: float, 
         # Convert degrees to radians
         processed_radians = processed_degree / 180.0 * torch.pi
         processed_action[i] = processed_radians
-    
-    # Process gripper (already in correct range 0-100, scale to joint limits)
-    gripper_motor_range = motor_limits["gripper"]
-    gripper_joint_range = joint_limits["gripper"]
-    
-    # Convert gripper from 0-1 range to motor limit range
-    gripper_motor_value = gripper * (gripper_motor_range[1] - gripper_motor_range[0]) + gripper_motor_range[0]
-    
-    # Scale to joint limits (degrees)
-    gripper_degree = (gripper_motor_value - gripper_motor_range[0]) / (gripper_motor_range[1] - gripper_motor_range[0]) \
-        * (gripper_joint_range[1] - gripper_joint_range[0]) + gripper_joint_range[0]
-    
-    # Convert to radians
-    gripper_radians = gripper_degree / 180.0 * torch.pi
-    processed_action[5] = gripper_radians
     
     return processed_action
 
@@ -136,7 +121,7 @@ class BiSO101ZMQReceiver:
         self.timeout = timeout
         self.device = device if device is not None else torch.device("cpu")
         
-        # Shared data storage (12 elements: left_joints(5) + left_gripper(1) + right_joints(5) + right_gripper(1))
+        # Shared data storage (12 elements: left_joints(6) + right_joints(6))
         self.shared_action = Array(ctypes.c_float, 12)
         self.data_ready = Value(ctypes.c_bool, False)
         self.running = Value(ctypes.c_bool, True)
@@ -199,24 +184,19 @@ class BiSO101ZMQReceiver:
                         
                         # Parse JSON
                         data = json.loads(payload)
-                        
-                        # Extract joint positions (5 dims) and gripper (1 dim)
+
+                        # Extract joint positions (6 dims)
                         left_arm = data.get("left_arm", {})
                         right_arm = data.get("right_arm", {})
                         
                         left_joints = left_arm.get("joint_positions", [])
-                        left_gripper = left_arm.get("gripper", 0.0)
-                        
                         right_joints = right_arm.get("joint_positions", [])
-                        right_gripper = right_arm.get("gripper", 0.0)
                         
-                        # Update shared memory: [left_joints(5), left_gripper(1), right_joints(5), right_gripper(1)]
-                        for i in range(5):
+                        # Update shared memory: [left_joints(6), right_joints(6)]
+                        for i in range(6):
                             self.shared_action[i] = float(left_joints[i])
-                        self.shared_action[5] = float(left_gripper)
-                        for i in range(5):
+                        for i in range(6):
                             self.shared_action[6 + i] = float(right_joints[i])
-                        self.shared_action[11] = float(right_gripper)
                         
                         # Mark data as ready
                         self.data_ready.value = True
@@ -246,7 +226,7 @@ class BiSO101ZMQReceiver:
         """Get latest received action data with proper scaling.
         
         Returns:
-            Action tensor [left_joints(5), left_gripper(1), right_joints(5), right_gripper(1)] = 12 elements total
+            Action tensor [left_joints(6), right_joints(6)] = 12 elements total
             Scaled and converted to radians.
             Returns None if no data received yet.
         """
@@ -257,14 +237,12 @@ class BiSO101ZMQReceiver:
         raw_action = np.array(self.shared_action[:], dtype=np.float32)
         
         # Extract left and right arm data
-        left_joints = raw_action[:5].tolist()   # left joint positions (5)
-        left_gripper = float(raw_action[5])      # left gripper (1)
-        right_joints = raw_action[6:11].tolist() # right joint positions (5)
-        right_gripper = float(raw_action[11])    # right gripper (1)
-        
+        left_joints = raw_action[:6].tolist()   # left joint positions (6)
+        right_joints = raw_action[6:12].tolist() # right joint positions (6)
+
         # Convert to radians with proper scaling
-        left_action = convert_zmq_action_to_radians(left_joints, left_gripper, self.device)
-        right_action = convert_zmq_action_to_radians(right_joints, right_gripper, self.device)
+        left_action = convert_zmq_action_to_radians(left_joints, self.device)
+        right_action = convert_zmq_action_to_radians(right_joints, self.device)
         
         # Concatenate: [left(6), right(6)]
         processed_action = torch.cat([left_action, right_action], dim=0)
@@ -438,7 +416,6 @@ def main():
                     start_record_state = True
                 # actions is already a torch.Tensor from advance(), just reshape for num_envs
                 actions = actions.unsqueeze(0).repeat(env.num_envs, 1)
-                print("actions:", actions)
                 env.step(actions)
             if rate_limiter:
                 rate_limiter.sleep(env)
