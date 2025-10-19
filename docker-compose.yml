@@ -209,9 +209,11 @@ services:
     environment: *default-isaac-lab-environment
     volumes: *default-leisaac-volumes
     network_mode: host
+    ports:
+      - "5555:5555"
     deploy: *default-isaac-lab-deploy
     # This is the entrypoint for the container
-    entrypoint: ["./docker/entrypoint.sh", "bash"]
+    entrypoint: ["bash"]
     stdin_open: true
     tty: true
 
